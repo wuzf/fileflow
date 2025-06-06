@@ -1,13 +1,23 @@
 {
-	"name": "filedownload",
-	"version": "0.0.0",
-	"private": true,
+	"name": "fileflow",
+	"version": "1.0.0",
+	"description": "A simple file management system based on Cloudflare Workers",
+	"main": "src/index.js",
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest"
 	},
+	"keywords": [
+		"cloudflare",
+		"workers",
+		"file-management",
+		"file-upload",
+		"file-download"
+	],
+	"author": "wuzf",
+	"license": "MIT",
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
 		"vitest": "~3.0.7",
