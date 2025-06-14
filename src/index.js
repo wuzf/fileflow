@@ -451,6 +451,7 @@ export default {
 						<div class="upload-area" id="dropZone">
 							<div class="icon">📁</div>
 							<p>拖拽文件到这里或点击选择文件</p>
+							<p style="color:#888;font-size:13px;">（也支持粘贴文件上传）</p>
 							<input type="file" name="files" multiple class="file-input" id="fileInput">
 						</div>
 						<div class="file-preview" id="filePreview"></div>
@@ -535,10 +536,11 @@ export default {
 					const fileInput = document.getElementById('fileInput');
 					const filePreview = document.getElementById('filePreview');
 					let selectedFiles = new Map(); // 存储文件名和文件对象的映射
+					let pasteTipTimeout = null; // 粘贴提示定时器
 
 					/**
 					 * 处理文件选择
-					 * @param {FileList} files - 选择的文件列表
+					 * @param {FileList|Array<File>} files - 选择的文件列表
 					 */
 					function handleFiles(files) {
 						Array.from(files).forEach(file => {
@@ -569,6 +571,26 @@ export default {
 							}
 						}
 					};
+
+					// 粘贴上传支持
+					window.addEventListener('paste', function(e) {
+						const items = e.clipboardData && e.clipboardData.items;
+						if (!items) return;
+						let hasFile = false;
+						for (let i = 0; i < items.length; i++) {
+							const item = items[i];
+							if (item.kind === 'file') {
+								hasFile = true;
+								handleFiles([item.getAsFile()]);
+							}
+						}
+						if (hasFile) {
+							const statusDiv = document.getElementById('uploadStatus');
+							statusDiv.innerHTML = '<div class="message">已粘贴文件，准备上传</div>';
+							clearTimeout(pasteTipTimeout);
+							pasteTipTimeout = setTimeout(() => { statusDiv.innerHTML = ''; }, 2000);
+						}
+					});
 
 					// ==================== 事件监听器 ====================
 
