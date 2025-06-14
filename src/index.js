@@ -167,7 +167,7 @@ export default {
 	 */
 	async handleFileDownload(url, env) {
 		try {
-			const fileName = url.pathname.substring(1);
+			const fileName = decodeURIComponent(url.pathname.substring(1));
 			const fileContent = await env.FILE.get(fileName, { type: 'arrayBuffer' });
 			
 			if (!fileContent) {
