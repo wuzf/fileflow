@@ -7,6 +7,7 @@
  * - 文件下载：支持所有常见文件类型的下载
  * - 文件删除：支持删除已上传的文件
  * - 文件列表：实时显示所有已上传的文件
+ * - 剪贴板：支持文本内容的云端剪贴、查看和删除
  */
 
 export default {
@@ -41,7 +42,20 @@ export default {
 			if (url.pathname === '/upload' && request.method === 'POST') {
 				return await this.handleFileUpload(request, env);
 			}
-			
+
+			// 剪贴板API
+			if (url.pathname === '/note' && request.method === 'GET') {
+				return await this.handleNoteList(env);
+			}
+			if (url.pathname === '/note' && request.method === 'POST') {
+				return await this.handleNoteAdd(request, env);
+			}
+
+			// 新增：剪贴内容删除API
+			if (url.pathname.startsWith('/note/delete/') && request.method === 'DELETE') {
+				return await this.handleNoteDelete(url, env);
+			}
+
 			// 文件下载处理
 			return await this.handleFileDownload(url, env);
 		} catch (error) {
@@ -187,6 +201,74 @@ export default {
 			});
 		} catch (error) {
 			return this.createErrorResponse('获取文件失败', 500);
+		}
+	},
+
+	/**
+	 * 获取剪贴板内容列表
+	 * @param {Object} env
+	 * @returns {Response}
+	 */
+	async handleNoteList(env) {
+		try {
+			const list = await env.NOTE.list();
+			const notes = [];
+			for (const item of list.keys) {
+				const value = await env.NOTE.get(item.name, { type: 'json' });
+				if (value) notes.push({ ...value, key: item.name }); // 带上key
+			}
+			// 按时间倒序
+			notes.sort((a, b) => b.time - a.time);
+			return new Response(JSON.stringify(notes), {
+				headers: { 'content-type': 'application/json' },
+			});
+		} catch (error) {
+			return this.createErrorResponse('获取剪贴内容失败', 500);
+		}
+	},
+
+	/**
+	 * 新增剪贴板内容
+	 * @param {Request} request
+	 * @param {Object} env
+	 * @returns {Response}
+	 */
+	async handleNoteAdd(request, env) {
+		try {
+			const data = await request.json();
+			const content = (data.content || '').trim();
+			console.log('收到剪贴内容:', content);
+			const note = {
+				content,
+				time: Date.now(),
+			};
+			const key = 'note_' + note.time + '_' + Math.random().toString(36).slice(2, 8);
+			await env.NOTE.put(key, JSON.stringify(note));
+			console.log('已写入 NOTE:', key);
+			return new Response(JSON.stringify({ success: true }), {
+				headers: { 'content-type': 'application/json' },
+			});
+		} catch (error) {
+			console.log('剪贴内容写入异常:', error);
+			return this.createErrorResponse('剪贴失败', 500);
+		}
+	},
+
+	/**
+	 * 新增：处理剪贴板内容删除请求
+	 * @param {URL} url
+	 * @param {Object} env
+	 * @returns {Response}
+	 */
+	async handleNoteDelete(url, env) {
+		try {
+			const key = decodeURIComponent(url.pathname.substring('/note/delete/'.length));
+			await env.NOTE.delete(key);
+			return new Response(JSON.stringify({ success: true }), {
+				headers: { 'content-type': 'application/json' },
+			});
+		} catch (error) {
+			return this.createErrorResponse('剪贴内容删除失败', 500);
 		}
 	},
 
@@ -443,7 +525,22 @@ export default {
 			</head>
 			<body>
 				<h1>文件管理系统</h1>
-				
+
+				<!-- 文件列表区域 -->
+				<h2>文件列表</h2>
+				<div id="fileList">
+					${fileList.keys.length > 0 ? `
+						<ul class="file-list">
+							${fileList.keys.map(file => `
+								<li class="file-item">
+									<a href="/${file.name}">${file.name}</a>
+									<button class="delete-btn" onclick="deleteFile('${file.name}')">删除</button>
+								</li>
+							`).join('')}
+						</ul>
+					` : '<p class="no-files">暂无文件</p>'}
+				</div>
+
 				<!-- 上传区域 -->
 				<div class="upload-form">
 					<h2>上传文件</h2>
@@ -463,19 +560,18 @@ export default {
 					</div>
 				</div>
 
-				<!-- 文件列表 -->
-				<h2>文件列表</h2>
-				<div id="fileList">
-					${fileList.keys.length > 0 ? `
-						<ul class="file-list">
-							${fileList.keys.map(file => `
-								<li class="file-item">
-									<a href="/${file.name}">${file.name}</a>
-									<button class="delete-btn" onclick="deleteFile('${file.name}')">删除</button>
-								</li>
-							`).join('')}
-						</ul>
-					` : '<p class="no-files">暂无文件</p>'}
+				<!-- 剪贴板区域（移到最后） -->
+				<div class="notebook" style="margin-top:32px;padding:20px;background:#f9f9f9;border-radius:6px;">
+					<h2>剪贴板</h2>
+					<form id="noteForm" style="margin-bottom:10px;">
+						<textarea id="noteInput" rows="3" style="width:100%;resize:vertical;padding:8px;font-size:15px;" placeholder="在这里输入或粘贴内容，然后点击保存..."></textarea>
+						<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
+							<span id="noteTip" style="color:#888;font-size:13px;">支持粘贴文本，保存后自动刷新</span>
+							<button type="submit" style="background:#28a745;color:white;border:none;padding:6px 18px;border-radius:4px;cursor:pointer;">保存</button>
+						</div>
+					</form>
+					<div id="noteStatus"></div>
+					<div id="noteList" style="margin-top:10px;"></div>
 				</div>
 
 				<script>
@@ -676,6 +772,115 @@ export default {
 							statusDiv.innerHTML = '<div class="message error">上传失败：' + (error.message || '未知错误') + '</div>';
 						}
 					});
+
+					// ==================== 剪贴板 ====================
+					async function loadNotes() {
+						try {
+							const res = await fetch('/note');
+							const notes = await res.json();
+							const noteList = document.getElementById('noteList');
+							if (!notes.length) {
+								noteList.innerHTML = '<div style="color:#888;font-style:italic;">暂无剪贴内容</div>';
+								return;
+							}
+							noteList.innerHTML = notes.map(note => \`
+								<div style="background:#fff;border-radius:4px;padding:8px 12px;margin-bottom:8px;border:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+									<div style="white-space:pre-wrap;word-break:break-all;max-width:70%;">\${escapeHtml(note.content)}</div>
+									<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+										<div style="color:#aaa;font-size:12px;">\${formatTime(note.time)}</div>
+										<div style="display:flex;gap:6px;">
+											<button class="delete-btn" style="padding:2px 10px;font-size:13px;" onclick="deleteNote('\${note.key}')">删除</button>
+											<button class="delete-btn" style="background:#007bff;margin-left:0;padding:2px 10px;font-size:13px;" onclick="copyNoteContent(this, '\${escapeHtml(note.content)}')">复制</button>
+										</div>
+									</div>
+								</div>
+							\`).join('');
+						} catch (e) {
+							document.getElementById('noteList').innerHTML = '<div style="color:#c00;">剪贴内容加载失败</div>';
+						}
+					}
+
+					function escapeHtml(str) {
+						return str.replace(/[&<>"']/g, function(c) {
+							return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+						});
+					}
+
+					function formatTime(ts) {
+						const d = new Date(ts);
+						return d.getFullYear() + '-' + (d.getMonth()+1).toString().padStart(2,'0') + '-' + d.getDate().toString().padStart(2,'0') + ' ' + d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+					}
+
+					// 剪贴内容表单提交
+					document.getElementById('noteForm').addEventListener('submit', async function(e) {
+						e.preventDefault();
+						const input = document.getElementById('noteInput');
+						const status = document.getElementById('noteStatus');
+						const content = input.value.trim();
+						if (!content) {
+							status.innerHTML = '<div class="message error">内容不能为空</div>';
+							return;
+						}
+						status.innerHTML = '<div class="message">正在保存...</div>';
+						try {
+							const res = await fetch('/note', {
+								method: 'POST',
+								headers: { 'Content-Type': 'application/json' },
+								body: JSON.stringify({ content })
+							});
+							const result = await res.json();
+							if (res.ok && result.success) {
+								status.innerHTML = '<div class="message success">保存成功！</div>';
+								input.value = '';
+								await loadNotes();
+							} else {
+								throw new Error(result.error || '保存失败');
+							}
+						} catch (err) {
+							status.innerHTML = '<div class="message error">保存失败：' + (err.message || '未知错误') + '</div>';
+						}
+						setTimeout(() => { status.innerHTML = ''; }, 2000);
+					});
+
+					// 支持粘贴文本到输入框
+					document.getElementById('noteInput').addEventListener('paste', function(e) {
+						document.getElementById('noteTip').innerText = '已粘贴内容，可直接保存';
+						setTimeout(() => { document.getElementById('noteTip').innerText = '支持粘贴文本，保存后自动刷新'; }, 2000);
+					});
+
+					// 删除剪贴内容
+					async function deleteNote(key) {
+						if (!confirm('确定要删除这条剪贴内容吗？')) return;
+						try {
+							const res = await fetch('/note/delete/' + encodeURIComponent(key), { method: 'DELETE' });
+							const result = await res.json();
+							if (res.ok && result.success) {
+								await loadNotes();
+							} else {
+								throw new Error(result.error || '删除失败');
+							}
+						} catch (err) {
+							alert('删除剪贴内容失败：' + (err.message || '未知错误'));
+						}
+					}
+
+					// 一键复制内容
+					async function copyNoteContent(btn, content) {
+						try {
+							await navigator.clipboard.writeText(content.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'"));
+							btn.innerText = '已复制';
+							btn.style.background = '#28a745';
+							setTimeout(() => {
+								btn.innerText = '复制';
+								btn.style.background = '#007bff';
+							}, 1200);
+						} catch (err) {
+							alert('复制失败：' + (err.message || '未知错误'));
+						}
+					}
+
+					// 页面加载时自动加载剪贴内容
+					loadNotes();
 				</script>
 			</body>
 			</html>
