@@ -7,7 +7,7 @@
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
-		"test": "vitest"
+		"test": "vitest run"
 	},
 	"keywords": [
 		"cloudflare",
@@ -19,7 +19,6 @@
 	"author": "wuzf",
 	"license": "MIT",
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.8.19",
 		"vitest": "~3.0.7",
 		"wrangler": "^4.19.1"
 	}
