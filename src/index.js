@@ -1,3 +1,6 @@
+const AUTH_COOKIE_NAME = 'fileflow_auth';
+const AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
+
 /**
  * 文件管理系统
  * 基于 Cloudflare Workers 实现的文件上传、下载和删除服务
@@ -23,6 +26,10 @@ export default {
 		
 		// 路由处理
 		try {
+			const authResponse = await this.handleAuthentication(request, url, env);
+			if (authResponse) {
+				return authResponse;
+			}
 			// 首页路由
 			if (url.pathname === '/') {
 				return await this.handleHomePage(env);
@@ -79,11 +86,115 @@ export default {
 			return new Response(this.generateHomePage(fileList), {
 				headers: {
 					'content-type': 'text/html;charset=UTF-8',
+					'cache-control': 'no-store',
 				},
 			});
 		} catch (error) {
 			return this.createErrorResponse('获取文件列表失败', 500);
 		}
+	},
+
+	async handleAuthentication(request, url, env) {
+		const password = this.getAccessPassword(env);
+
+		if (this.isPublicFileDownloadRequest(url, request.method)) {
+			return null;
+		}
+
+		if (url.pathname === '/auth/login' && request.method === 'POST') {
+			if (!password) {
+				return this.createAuthConfigResponse(request);
+			}
+
+			return await this.handleAuthLogin(request, password);
+		}
+
+		if (url.pathname === '/auth/logout' && request.method === 'POST') {
+			return this.handleAuthLogout(request);
+		}
+
+		if (!password) {
+			return this.createAuthConfigResponse(request);
+		}
+
+		if (await this.isAuthenticated(request, password)) {
+			return null;
+		}
+
+		return this.createUnauthorizedResponse(request);
+	},
+
+	getAccessPassword(env) {
+		return String(env.ACCESS_PASSWORD || '').trim();
+	},
+
+	isPublicFileDownloadRequest(url, method) {
+		if (method !== 'GET') {
+			return false;
+		}
+
+		if (url.pathname === '/') {
+			return false;
+		}
+
+		if (
+			url.pathname === '/list'
+			|| url.pathname === '/upload'
+			|| url.pathname === '/note'
+			|| url.pathname.startsWith('/delete/')
+			|| url.pathname.startsWith('/note/')
+			|| url.pathname.startsWith('/auth/')
+		) {
+			return false;
+		}
+
+		return true;
+	},
+
+	async handleAuthLogin(request, password) {
+		try {
+			const data = await request.json();
+			const submittedPassword = typeof data.password === 'string' ? data.password : '';
+
+			if (!submittedPassword) {
+				return this.createErrorResponse('请输入访问密码', 400);
+			}
+
+			if (submittedPassword !== password) {
+				return this.createErrorResponse('密码错误', 401);
+			}
+
+			const token = await this.createAuthToken(password);
+			return new Response(JSON.stringify({ success: true }), {
+				headers: {
+					'content-type': 'application/json',
+					'set-cookie': this.createAuthCookie(token, request),
+				},
+			});
+		} catch (error) {
+			return this.createErrorResponse('登录失败', 500);
+		}
+	},
+
+	handleAuthLogout(request) {
+		return new Response(JSON.stringify({ success: true }), {
+			headers: {
+				'content-type': 'application/json',
+				'set-cookie': this.clearAuthCookie(request),
+			},
+		});
+	},
+
+	async isAuthenticated(request, password) {
+		const cookies = this.parseCookies(request.headers.get('cookie'));
+		const token = cookies[AUTH_COOKIE_NAME];
+
+		if (!token) {
+			return false;
+		}
+
+		const expectedToken = await this.createAuthToken(password);
+		return token === expectedToken;
 	},
 
 	/**
@@ -410,6 +521,104 @@ export default {
 		});
 	},
 
+	parseCookies(cookieHeader) {
+		const cookies = {};
+
+		if (!cookieHeader) {
+			return cookies;
+		}
+
+		for (const segment of cookieHeader.split(';')) {
+			const trimmedSegment = segment.trim();
+			if (!trimmedSegment) {
+				continue;
+			}
+
+			const separatorIndex = trimmedSegment.indexOf('=');
+			if (separatorIndex === -1) {
+				continue;
+			}
+
+			const key = trimmedSegment.slice(0, separatorIndex).trim();
+			const value = trimmedSegment.slice(separatorIndex + 1).trim();
+			cookies[key] = value;
+		}
+
+		return cookies;
+	},
+
+	async createAuthToken(password) {
+		const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
+		return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+	},
+
+	createAuthCookie(token, request) {
+		const cookieParts = [
+			`${AUTH_COOKIE_NAME}=${token}`,
+			'Path=/',
+			'HttpOnly',
+			'SameSite=Lax',
+			`Max-Age=${AUTH_COOKIE_MAX_AGE}`,
+		];
+
+		if (request && new URL(request.url).protocol === 'https:') {
+			cookieParts.push('Secure');
+		}
+
+		return cookieParts.join('; ');
+	},
+
+	clearAuthCookie(request) {
+		const cookieParts = [
+			`${AUTH_COOKIE_NAME}=`,
+			'Path=/',
+			'HttpOnly',
+			'SameSite=Lax',
+			'Max-Age=0',
+		];
+
+		if (request && new URL(request.url).protocol === 'https:') {
+			cookieParts.push('Secure');
+		}
+
+		return cookieParts.join('; ');
+	},
+
+	prefersHtml(request) {
+		const accept = request.headers.get('accept') || '';
+		return accept.includes('text/html');
+	},
+
+	createUnauthorizedResponse(request) {
+		if (this.prefersHtml(request)) {
+			return new Response(this.generateLoginPage(), {
+				status: 401,
+				headers: {
+					'content-type': 'text/html;charset=UTF-8',
+					'cache-control': 'no-store',
+				},
+			});
+		}
+
+		return this.createErrorResponse('未授权访问，请先登录', 401);
+	},
+
+	createAuthConfigResponse(request) {
+		const message = '未配置访问密码，请设置 ACCESS_PASSWORD';
+
+		if (this.prefersHtml(request)) {
+			return new Response(this.generateAuthConfigPage(message), {
+				status: 500,
+				headers: {
+					'content-type': 'text/html;charset=UTF-8',
+					'cache-control': 'no-store',
+				},
+			});
+		}
+
+		return this.createErrorResponse(message, 500);
+	},
+
 	/**
 	 * HTML 转义
 	 * @param {string} value
@@ -434,6 +643,213 @@ export default {
 	 * @param {Object} fileList - 文件列表
 	 * @returns {string} HTML内容
 	 */
+	generateLoginPage() {
+		return `
+			<!DOCTYPE html>
+			<html>
+			<head>
+				<meta charset="UTF-8">
+				<meta name="viewport" content="width=device-width, initial-scale=1.0">
+				<title>FileFlow 登录</title>
+				<style>
+					* { box-sizing: border-box; }
+					body {
+						margin: 0;
+						min-height: 100vh;
+						display: flex;
+						align-items: center;
+						justify-content: center;
+						padding: 20px;
+						font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+						background: linear-gradient(135deg, #f0f4ff, #f7f9fc);
+						color: #1f2937;
+					}
+					.login-card {
+						width: 100%;
+						max-width: 360px;
+						background: #fff;
+						border-radius: 16px;
+						padding: 28px 24px;
+						box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+					}
+					h1 {
+						margin: 0 0 10px;
+						font-size: 28px;
+						text-align: center;
+					}
+					p {
+						margin: 0 0 20px;
+						color: #6b7280;
+						text-align: center;
+						line-height: 1.5;
+					}
+					label {
+						display: block;
+						margin-bottom: 8px;
+						font-size: 14px;
+						font-weight: 600;
+					}
+					input {
+						width: 100%;
+						padding: 12px 14px;
+						border: 1px solid #d0d7de;
+						border-radius: 10px;
+						font-size: 15px;
+					}
+					input:focus {
+						outline: none;
+						border-color: #2563eb;
+						box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+					}
+					button {
+						width: 100%;
+						margin-top: 14px;
+						padding: 12px 14px;
+						border: none;
+						border-radius: 10px;
+						background: #2563eb;
+						color: #fff;
+						font-size: 15px;
+						font-weight: 600;
+						cursor: pointer;
+					}
+					button:hover {
+						background: #1d4ed8;
+					}
+					.message {
+						margin-top: 14px;
+						padding: 10px 12px;
+						border-radius: 10px;
+						font-size: 14px;
+						display: none;
+					}
+					.message.error {
+						background: #fef2f2;
+						color: #b91c1c;
+					}
+					.tip {
+						margin-top: 12px;
+						font-size: 12px;
+						color: #94a3b8;
+						text-align: center;
+					}
+				</style>
+			</head>
+			<body>
+				<div class="login-card">
+					<h1>FileFlow</h1>
+					<p>请输入访问密码后继续使用文件和剪贴板功能。</p>
+					<form id="loginForm">
+						<label for="password">访问密码</label>
+						<input id="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+						<button type="submit">登录</button>
+					</form>
+					<div id="loginMessage" class="message error"></div>
+					<div class="tip">登录成功后会保存 7 天登录态。</div>
+				</div>
+				<script>
+					const form = document.getElementById('loginForm');
+					const passwordInput = document.getElementById('password');
+					const message = document.getElementById('loginMessage');
+
+					function showError(text) {
+						message.style.display = 'block';
+						message.textContent = text;
+					}
+
+					form.addEventListener('submit', async function(event) {
+						event.preventDefault();
+						message.style.display = 'none';
+						const password = passwordInput.value.trim();
+
+						if (!password) {
+							showError('请输入访问密码');
+							return;
+						}
+
+						try {
+							const response = await fetch('/auth/login', {
+								method: 'POST',
+								headers: { 'Content-Type': 'application/json' },
+								body: JSON.stringify({ password })
+							});
+							const result = await response.json().catch(() => ({}));
+
+							if (!response.ok || !result.success) {
+								throw new Error(result.error || '登录失败');
+							}
+
+							window.location.replace('/');
+						} catch (error) {
+							showError(error.message || '登录失败');
+						}
+					});
+
+					passwordInput.focus();
+				</script>
+			</body>
+			</html>
+		`;
+	},
+
+	generateAuthConfigPage(message) {
+		const escapedMessage = this.escapeHtml(message);
+		return `
+			<!DOCTYPE html>
+			<html>
+			<head>
+				<meta charset="UTF-8">
+				<meta name="viewport" content="width=device-width, initial-scale=1.0">
+				<title>FileFlow 配置错误</title>
+				<style>
+					body {
+						margin: 0;
+						min-height: 100vh;
+						display: flex;
+						align-items: center;
+						justify-content: center;
+						padding: 20px;
+						font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+						background: #f8fafc;
+						color: #1f2937;
+					}
+					.panel {
+						max-width: 560px;
+						background: #fff;
+						border-radius: 14px;
+						padding: 24px;
+						box-shadow: 0 16px 36px rgba(15, 23, 42, 0.1);
+					}
+					h1 { margin-top: 0; }
+					code {
+						background: #f1f5f9;
+						padding: 2px 6px;
+						border-radius: 6px;
+					}
+					pre {
+						margin: 14px 0 0;
+						padding: 14px;
+						border-radius: 10px;
+						background: #0f172a;
+						color: #e2e8f0;
+						overflow: auto;
+					}
+				</style>
+			</head>
+			<body>
+				<div class="panel">
+					<h1>FileFlow 未完成鉴权配置</h1>
+					<p>${escapedMessage}</p>
+					<p>本地开发可在 <code>.dev.vars</code> 中添加：</p>
+					<pre>ACCESS_PASSWORD=your-password</pre>
+					<p>部署到 Cloudflare 前请执行：</p>
+					<pre>wrangler secret put ACCESS_PASSWORD</pre>
+				</div>
+			</body>
+			</html>
+		`;
+	},
+
 	generateHomePage(fileList) {
 		return `
 			<!DOCTYPE html>
@@ -457,6 +873,31 @@ export default {
 						text-align: center;
 						margin-bottom: 24px;
 						font-size: 24px;
+					}
+					.page-header {
+						display: flex;
+						align-items: center;
+						justify-content: space-between;
+						gap: 12px;
+						margin-bottom: 24px;
+					}
+					.page-header h1 {
+						margin: 0;
+						flex: 1;
+						text-align: center;
+					}
+					.logout-btn {
+						border: none;
+						border-radius: 999px;
+						padding: 8px 14px;
+						background: #111827;
+						color: #fff;
+						cursor: pointer;
+						font-size: 13px;
+						white-space: nowrap;
+					}
+					.logout-btn:hover {
+						background: #1f2937;
 					}
 
 					/* Tab 样式 */
@@ -833,7 +1274,11 @@ export default {
 				</style>
 			</head>
 			<body>
-				<h1>FileFlow</h1>
+				<div class="page-header">
+					<div style="width:72px;"></div>
+					<h1>FileFlow</h1>
+					<button type="button" class="logout-btn" id="logoutBtn">退出登录</button>
+				</div>
 
 				<!-- Tab 导航 -->
 				<div class="tabs">
@@ -1355,6 +1800,19 @@ export default {
 					}
 
 					// 页面加载时自动加载剪贴内容
+					const logoutBtn = document.getElementById('logoutBtn');
+					logoutBtn.addEventListener('click', async function() {
+						if (!confirm('确定要退出登录吗？')) {
+							return;
+						}
+
+						try {
+							await fetch('/auth/logout', { method: 'POST' });
+						} finally {
+							window.location.replace('/');
+						}
+					});
+
 					switchTab(getSavedTab());
 					loadNotes();
 				</script>

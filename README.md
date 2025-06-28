@@ -1,132 +1,191 @@
-# fileflow
+# FileFlow
 
-一个基于 Cloudflare Workers 的简单文件管理系统，支持文件的上传、下载和删除功能。
+FileFlow 是一个基于 Cloudflare Workers 的轻量文件与剪贴板管理工具。
 
-## 功能特点
+它把前端页面、API 路由和业务逻辑都放在 `src/index.js` 中，通过 Cloudflare KV 保存文件和文本内容。
 
-- 文件上传：支持任意类型文件的上传
-- 文件下载：支持所有常见文件类型的下载
-- 文件删除：支持删除已上传的文件
-- 文件列表：实时显示所有已上传的文件
-- 进度显示：上传时显示进度条
-- 响应式设计：适配各种屏幕尺寸
+## 功能特性
 
-## 使用方法
+- 文件列表查看、下载、删除
+- 多文件上传，支持拖拽上传
+- 支持从剪贴板直接粘贴文件上传
+- 剪贴板文本保存、编辑、删除、复制
+- 简单密码鉴权，未登录无法访问页面和 API
+- 单文件部署，无需额外前端构建流程
 
-1. 访问系统首页，可以看到文件上传表单和文件列表
-2. 点击"选择文件"按钮选择要上传的文件
-3. 点击"上传"按钮开始上传
-4. 上传成功后，文件会出现在文件列表中
-5. 点击文件名可以下载文件
-6. 点击文件旁边的"删除"按钮可以删除文件
+## 鉴权说明
 
-## 开发说明
+项目现在默认启用密码鉴权。
 
-### 环境准备
+- 浏览器访问首页时，未登录会先看到登录页
+- 登录成功后会写入一个基于 Cookie 的登录态
+- 登录态默认保留 7 天
+- 所有页面访问和 API 请求都会经过鉴权检查
 
-1. 安装 Wrangler CLI：
-```bash
-npm install -g wrangler
+补充说明：文件的直链下载（例如 `GET /example.pdf`）允许匿名访问，不需要先登录；文件列表、上传、删除以及剪贴板相关操作仍然需要登录。
+
+### 本地开发配置
+
+在项目根目录创建 `.dev.vars`：
+
+```env
+ACCESS_PASSWORD=your-password
 ```
 
-2. 登录到 Cloudflare 账户：
+### 线上部署配置
+
+部署到 Cloudflare Workers 前，需要把密码配置为 Secret：
+
 ```bash
-wrangler login
+wrangler secret put ACCESS_PASSWORD
 ```
 
-### 本地开发
+如果未配置 `ACCESS_PASSWORD`，线上会显示“未完成鉴权配置”提示页。
 
-1. 安装依赖：
+## 快速开始
+
+### 1. 安装依赖
+
 ```bash
 npm install
 ```
 
-2. 启动开发服务器：
+### 2. 登录 Cloudflare
+
+```bash
+npx wrangler login
+```
+
+### 3. 配置本地密码
+
+在根目录新建 `.dev.vars`：
+
+```env
+ACCESS_PASSWORD=your-password
+```
+
+### 4. 启动本地开发
+
 ```bash
 npm run dev
 ```
 
-3. 访问 http://localhost:8787 查看效果
+默认访问地址：`http://localhost:8787`
 
-### KV 存储操作
+### 5. 运行测试
 
-1. 创建 KV 命名空间：
 ```bash
-wrangler kv namespace create FILE
+npm test
 ```
 
-2. 配置 wrangler.toml：
-```toml
-name = "fileflow"
-main = "src/index.js"
-compatibility_date = "2024-01-01"
+## 部署说明
 
-[[kv_namespaces]]
-binding = "FILE"
-id = "your-namespace-id"
-```
+### 直接部署
 
-3. KV 命名空间管理：
-```bash
-# 查看所有 KV 命名空间
-wrangler kv namespace list
-
-# 删除 KV 命名空间
-wrangler kv namespace delete --namespace-id=your-namespace-id
-```
-
-4. KV 文件操作：
-```bash
-# 上传文件到 KV
-wrangler kv key put --namespace-id=your-namespace-id filename --path=path/to/file --remote
-
-# 查看 KV 中的文件列表
-wrangler kv key list --namespace-id=your-namespace-id --remote
-
-# 获取 KV 中的文件内容
-wrangler kv key get --namespace-id=your-namespace-id filename
-
-# 删除 KV 中的文件
-wrangler kv key delete --namespace-id=your-namespace-id filename --remote
-```
-
-### 部署
-
-使用以下命令部署到 Cloudflare Workers：
 ```bash
 npm run deploy
 ```
-或者
+
+等价命令：
+
 ```bash
-wrangler deploy
+npx wrangler deploy
 ```
 
+### 部署前必须检查
 
-## 技术栈
+1. 已执行 `npx wrangler login`
+2. 已配置 `ACCESS_PASSWORD`
+3. `wrangler.jsonc` 中的 KV 绑定属于你的 Cloudflare 账号
 
-- Cloudflare Workers
-- Cloudflare KV 存储
-- HTML5
-- CSS3
-- JavaScript (ES6+)
+### 如果 KV 绑定不属于当前账号
 
-## 注意事项
+先创建新的 KV Namespace：
 
-1. 文件大小限制：由于 Cloudflare Workers 的限制，单个文件大小不能超过 100MB
-2. 存储限制：请确保您的 Cloudflare KV 存储空间足够
-3. 文件类型：支持所有常见文件类型，系统会自动识别文件类型并设置正确的 MIME 类型
+```bash
+npx wrangler kv namespace create FILE
+npx wrangler kv namespace create NOTE
+```
 
-## 错误处理
+然后把返回的 `id` 更新到 `wrangler.jsonc` 中对应的 `kv_namespaces` 配置里，再重新部署。
 
-系统包含完整的错误处理机制：
-- 上传失败时会显示错误信息
-- 删除文件时会有确认提示
-- 所有操作都有成功/失败的反馈
+## 存储结构
 
-## 贡献
+项目使用两个 Cloudflare KV 命名空间：
 
-欢迎提交 Issue 和 Pull Request 来帮助改进这个项目。
+- `FILE`：保存上传的文件内容
+- `NOTE`：保存剪贴板文本内容
+
+## 主要路由
+
+### 鉴权
+
+- `POST /auth/login`：登录
+- `POST /auth/logout`：退出登录
+
+### 文件
+
+- `GET /`：首页
+- `GET /list`：获取文件列表
+- `POST /upload`：上传文件
+- `DELETE /delete/{name}`：删除文件
+- `GET /{name}`：下载文件
+
+### 剪贴板
+
+- `GET /note`：获取剪贴板列表
+- `POST /note`：新增剪贴板内容
+- `PUT /note/update/{key}`：更新剪贴板内容
+- `DELETE /note/delete/{key}`：删除剪贴板内容
+
+## 项目结构
+
+```text
+.
+├─ src/
+│  └─ index.js          # Worker 主逻辑、页面模板、API
+├─ test/
+│  └─ index.spec.js     # Vitest 测试
+├─ wrangler.jsonc       # 当前使用的 Wrangler 配置
+├─ wrangler.toml        # 旧配置文件，保留中
+└─ README.md
+```
+
+## 开发说明
+
+### 页面实现方式
+
+前端页面通过 `generateHomePage()`、`generateLoginPage()` 等函数直接生成 HTML，样式和脚本都以内联方式写在 Worker 中。
+
+### 当前前端能力
+
+- 文件页与剪贴板页 Tab 切换
+- 文件拖拽上传
+- 粘贴文件上传
+- 剪贴板文本编辑与复制
+- 退出登录
+
+### 测试方式
+
+测试使用 `Vitest`，通过内存版 KV Mock 验证核心行为，不依赖 Cloudflare Workers 测试池。
+
+当前测试覆盖：
+
+- 未登录访问首页时返回登录页
+- 正确密码登录
+- 错误密码登录失败
+- 已登录访问首页
+- 未登录访问 API 被拒绝
+- 剪贴板空内容校验
+- 剪贴板更新成功
+- 更新不存在的剪贴板项返回 404
+
+## 限制说明
+
+- 单个文件大小受 Cloudflare Workers 平台限制
+- 文件与文本内容都存储在 Cloudflare KV 中，请关注容量与配额
+- 中文文件名下载会通过 URL 编码处理
 
 ## 许可证
 
-MIT License 
+MIT
