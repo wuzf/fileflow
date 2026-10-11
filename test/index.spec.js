@@ -1,15 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src';
 
 const ACCESS_PASSWORD = 'test-password';
 
 function createKvNamespace(initialEntries = []) {
-	const store = new Map(initialEntries);
+	const store = new Map(initialEntries.map(([name, value, metadata]) => [name, { value, metadata }]));
 
 	return {
 		async list() {
 			return {
-				keys: Array.from(store.keys()).map(name => ({ name })),
+				keys: Array.from(store.entries()).map(([name, entry]) => (
+					entry.metadata === undefined ? { name } : { name, metadata: entry.metadata }
+				)),
+				list_complete: true,
 			};
 		},
 		async get(key, options = {}) {
@@ -17,15 +20,15 @@ function createKvNamespace(initialEntries = []) {
 				return null;
 			}
 
-			const value = store.get(key);
+			const { value } = store.get(key);
 			if (options.type === 'json') {
 				return JSON.parse(value);
 			}
 
 			return value;
 		},
-		async put(key, value) {
-			store.set(key, value);
+		async put(key, value, options = {}) {
+			store.set(key, { value, metadata: options.metadata });
 		},
 		async delete(key) {
 			store.delete(key);
@@ -129,6 +132,116 @@ describe('fileflow worker auth', () => {
 		const html = await response.text();
 		expect(html).toContain('FileFlow');
 		expect(html).toContain('退出登录');
+	});
+});
+
+describe('fileflow worker file routes', () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	async function uploadFiles(env, files) {
+		const formData = new FormData();
+		for (const [name, content] of files) {
+			formData.append('files', new File([content], name, { type: 'text/plain' }));
+		}
+		const request = await createAuthenticatedRequest('http://example.com/upload', {
+			method: 'POST',
+			body: formData,
+		});
+		return worker.fetch(request, env);
+	}
+
+	it('persists the upload date for every uploaded file and returns it in the file list', async () => {
+		const uploadedAt = 1700000000000;
+		vi.spyOn(Date, 'now').mockReturnValue(uploadedAt);
+		const env = createEnv();
+		const response = await uploadFiles(env, [['report.txt', 'report'], ['notes.txt', 'notes']]);
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toEqual({
+			success: true,
+			results: [
+				{ name: 'report.txt', success: true, uploadedAt },
+				{ name: 'notes.txt', success: true, uploadedAt },
+			],
+		});
+
+		const listResponse = await worker.fetch(await createAuthenticatedRequest('http://example.com/list'), env);
+		expect(listResponse.status).toBe(200);
+		await expect(listResponse.json()).resolves.toEqual([
+			{ name: 'report.txt', metadata: { uploadedAt } },
+			{ name: 'notes.txt', metadata: { uploadedAt } },
+		]);
+	});
+
+	it('updates both the upload date and contents when replacing a file with the same name', async () => {
+		const originalTime = 1700000000000;
+		const replacementTime = originalTime + 60000;
+		const now = vi.spyOn(Date, 'now').mockReturnValue(originalTime);
+		const env = createEnv();
+		const originalResponse = await uploadFiles(env, [['report.txt', 'original contents']]);
+		expect((await originalResponse.json()).results[0]).toEqual({
+			name: 'report.txt', success: true, uploadedAt: originalTime,
+		});
+
+		now.mockReturnValue(replacementTime);
+		const replacementResponse = await uploadFiles(env, [['report.txt', 'replacement contents']]);
+		expect((await replacementResponse.json()).results[0]).toEqual({
+			name: 'report.txt', success: true, uploadedAt: replacementTime,
+		});
+
+		const listResponse = await worker.fetch(await createAuthenticatedRequest('http://example.com/list'), env);
+		await expect(listResponse.json()).resolves.toEqual([
+			{ name: 'report.txt', metadata: { uploadedAt: replacementTime } },
+		]);
+		const downloadResponse = await worker.fetch(new Request('http://example.com/report.txt'), env);
+		expect(downloadResponse.status).toBe(200);
+		await expect(downloadResponse.text()).resolves.toBe('replacement contents');
+	});
+
+	it('keeps existing files without upload metadata available in the list, home page and downloads', async () => {
+		const env = createEnv({ files: [['legacy.txt', 'legacy contents']] });
+		const listResponse = await worker.fetch(await createAuthenticatedRequest('http://example.com/list'), env);
+		expect(listResponse.status).toBe(200);
+		await expect(listResponse.json()).resolves.toEqual([{ name: 'legacy.txt' }]);
+
+		const homeResponse = await worker.fetch(await createAuthenticatedRequest('http://example.com/'), env);
+		expect(homeResponse.status).toBe(200);
+		expect(await homeResponse.text()).toContain('legacy.txt');
+
+		const downloadResponse = await worker.fetch(new Request('http://example.com/legacy.txt'), env);
+		expect(downloadResponse.status).toBe(200);
+		await expect(downloadResponse.text()).resolves.toBe('legacy contents');
+	});
+
+	it.each(['/list', '/'])('includes all KV pages for %s, including pages after an empty page', async (path) => {
+		const firstFile = { name: 'first.txt', metadata: { uploadedAt: 1700000000000 } };
+		const lastFile = { name: 'last.txt', metadata: { uploadedAt: 1700000060000 } };
+		const pages = {
+			start: { keys: [firstFile], list_complete: false, cursor: 'empty-page' },
+			'empty-page': { keys: [], list_complete: false, cursor: 'last-page' },
+			'last-page': { keys: [lastFile], list_complete: true },
+		};
+		const env = createEnv();
+		env.FILE.list = vi.fn(async (options = {}) => {
+			const page = pages[options.cursor || 'start'];
+			if (!page) throw new Error('Unexpected KV cursor');
+			return page;
+		});
+
+		const response = await worker.fetch(await createAuthenticatedRequest('http://example.com' + path), env);
+		expect(response.status).toBe(200);
+		if (path === '/list') {
+			await expect(response.json()).resolves.toEqual([firstFile, lastFile]);
+		} else {
+			const html = await response.text();
+			expect(html).toContain(firstFile.name);
+			expect(html).toContain(lastFile.name);
+		}
+		expect(env.FILE.list).toHaveBeenCalledTimes(3);
+		expect(env.FILE.list.mock.calls[1][0]).toMatchObject({ cursor: 'empty-page' });
+		expect(env.FILE.list.mock.calls[2][0]).toMatchObject({ cursor: 'last-page' });
 	});
 });
 

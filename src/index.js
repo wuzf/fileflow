@@ -82,7 +82,7 @@ export default {
 	 */
 	async handleHomePage(env) {
 		try {
-			const fileList = await env.FILE.list();
+			const fileList = await this.listAllFiles(env);
 			return new Response(this.generateHomePage(fileList), {
 				headers: {
 					'content-type': 'text/html;charset=UTF-8',
@@ -198,16 +198,33 @@ export default {
 	},
 
 	/**
+	 * 读取所有分页，确保排序覆盖完整文件列表
+	 * @param {Object} env - 环境变量
+	 * @returns {Promise<Object>} 文件列表及其元数据
+	 */
+	async listAllFiles(env) {
+		const keys = [];
+		let cursor;
+		do {
+			const page = await env.FILE.list(cursor ? { cursor } : {});
+			keys.push(...page.keys);
+			cursor = page.list_complete === false ? page.cursor : undefined;
+		} while (cursor);
+		return { keys };
+	},
+
+	/**
 	 * 处理文件列表API请求
 	 * @param {Object} env - 环境变量
 	 * @returns {Response} JSON响应
 	 */
 	async handleFileList(env) {
 		try {
-			const fileList = await env.FILE.list();
+			const fileList = await this.listAllFiles(env);
 			return new Response(JSON.stringify(fileList.keys), {
 				headers: {
 					'content-type': 'application/json',
+					'cache-control': 'no-store',
 				},
 			});
 		} catch (error) {
@@ -258,9 +275,11 @@ export default {
 					}
 					
 					const fileBuffer = await file.arrayBuffer();
-					await env.FILE.put(file.name, fileBuffer);
+					const uploadedAt = Date.now();
+					await env.FILE.put(file.name, fileBuffer, { metadata: { uploadedAt } });
 					results.push({
 						name: file.name,
+						uploadedAt,
 						success: true
 					});
 				} catch (error) {
@@ -939,6 +958,25 @@ export default {
 					}
 
 					/* 文件列表样式 */
+					.file-toolbar {
+						display: flex;
+						align-items: center;
+						justify-content: flex-end;
+						flex-wrap: wrap;
+						gap: 8px;
+						margin-bottom: 12px;
+						font-size: 14px;
+						color: #555;
+					}
+					.file-toolbar select {
+						max-width: 100%;
+						padding: 7px 10px;
+						border: 1px solid #d0d0d0;
+						border-radius: 4px;
+						background: #fff;
+						color: #333;
+						font: inherit;
+					}
 					.file-list {
 						list-style: none;
 						padding: 0;
@@ -954,6 +992,17 @@ export default {
 					}
 					.file-item:last-child {
 						border-bottom: none;
+					}
+					.file-details {
+						flex: 1;
+						min-width: 0;
+					}
+					.file-date {
+						display: block;
+						margin-top: 4px;
+						font-size: 12px;
+						line-height: 1.5;
+						color: #777;
 					}
 					.file-item a {
 						color: #0066cc;
@@ -1249,7 +1298,7 @@ export default {
 							flex-direction: column;
 							align-items: flex-start;
 						}
-						.file-item a,
+						.file-details,
 						.note-meta {
 							width: 100%;
 						}
@@ -1288,22 +1337,17 @@ export default {
 
 				<!-- 文件管理 Tab -->
 				<div class="tab-panel active" id="tab-files">
+					<div class="file-toolbar">
+						<label for="fileSort">排序</label>
+						<select id="fileSort">
+							<option value="date-desc">上传日期：从新到旧</option>
+							<option value="date-asc">上传日期：从旧到新</option>
+							<option value="name-asc">文件名：升序</option>
+							<option value="name-desc">文件名：降序</option>
+						</select>
+					</div>
 					<div id="fileList">
-						${fileList.keys.length > 0 ? `
-							<ul class="file-list">
-								${fileList.keys.map(file => {
-									const fileName = String(file.name || '');
-									const escapedFileName = this.escapeHtml(fileName);
-									const encodedFileName = encodeURIComponent(fileName);
-									return `
-										<li class="file-item">
-											<a href="/${encodedFileName}" title="${escapedFileName}">${escapedFileName}</a>
-											<button type="button" class="delete-btn" data-file-name="${encodedFileName}" onclick="deleteFileFromButton(this)">删除</button>
-										</li>
-									`;
-								}).join('')}
-							</ul>
-						` : '<p class="no-files">暂无文件</p>'}
+						<p class="no-files">正在加载文件...</p>
 					</div>
 
 					<div class="upload-form">
@@ -1371,7 +1415,47 @@ export default {
 					}
 
 					// ==================== 文件列表管理 ====================
-					
+					const FILE_SORT_STORAGE_KEY = 'fileflow.fileSort';
+					const fileSort = document.getElementById('fileSort');
+					const fileNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+					let currentFiles = ${JSON.stringify(fileList.keys).replace(/</g, '\\u003c')};
+
+					try {
+						const savedSort = localStorage.getItem(FILE_SORT_STORAGE_KEY);
+						if (Array.from(fileSort.options).some(option => option.value === savedSort)) {
+							fileSort.value = savedSort;
+						}
+					} catch (error) {
+						console.warn('读取文件排序设置失败:', error);
+					}
+
+					fileSort.addEventListener('change', function() {
+						try {
+							localStorage.setItem(FILE_SORT_STORAGE_KEY, fileSort.value);
+						} catch (error) {
+							console.warn('保存文件排序设置失败:', error);
+						}
+						renderFileList(currentFiles);
+					});
+
+					function getUploadTime(file) {
+						const value = file.metadata && file.metadata.uploadedAt;
+						return typeof value === 'number' && Number.isFinite(new Date(value).getTime()) ? value : null;
+					}
+
+					function compareFiles(a, b) {
+						const nameOrder = fileNameCollator.compare(a.name, b.name);
+						if (fileSort.value === 'name-asc') return nameOrder;
+						if (fileSort.value === 'name-desc') return -nameOrder;
+						const aTime = getUploadTime(a);
+						const bTime = getUploadTime(b);
+						// 历史文件没有上传日期，按日期排序时始终放在末尾。
+						if (aTime === null) return bTime === null ? nameOrder : 1;
+						if (bTime === null) return -1;
+						const timeOrder = fileSort.value === 'date-asc' ? aTime - bTime : bTime - aTime;
+						return timeOrder || nameOrder;
+					}
+
 					/**
 					 * 更新文件列表
 					 */
@@ -1391,8 +1475,9 @@ export default {
 					}
 
 					function renderFileList(fileList) {
+						currentFiles = Array.isArray(fileList) ? fileList : [];
 						const container = document.getElementById('fileList');
-						if (!Array.isArray(fileList) || fileList.length === 0) {
+						if (currentFiles.length === 0) {
 							container.innerHTML = '<p class="no-files">暂无文件</p>';
 							return;
 						}
@@ -1400,7 +1485,7 @@ export default {
 						const list = document.createElement('ul');
 						list.className = 'file-list';
 
-						fileList.forEach(file => {
+						currentFiles.slice().sort(compareFiles).forEach(file => {
 							const fileName = String(file && file.name ? file.name : '');
 							const item = document.createElement('li');
 							item.className = 'file-item';
@@ -1410,6 +1495,16 @@ export default {
 							link.title = fileName;
 							link.textContent = fileName;
 
+							const details = document.createElement('div');
+							details.className = 'file-details';
+							const uploadedAt = getUploadTime(file);
+							const date = document.createElement(uploadedAt === null ? 'span' : 'time');
+							date.className = 'file-date';
+							date.textContent = uploadedAt === null ? '上传日期未知' : '上传于 ' + formatTime(uploadedAt);
+							if (uploadedAt !== null) date.dateTime = new Date(uploadedAt).toISOString();
+							details.appendChild(link);
+							details.appendChild(date);
+
 							const button = document.createElement('button');
 							button.type = 'button';
 							button.className = 'delete-btn';
@@ -1418,19 +1513,13 @@ export default {
 								deleteFile(fileName);
 							});
 
-							item.appendChild(link);
+							item.appendChild(details);
 							item.appendChild(button);
 							list.appendChild(item);
 						});
 
 						container.replaceChildren(list);
 					}
-
-					function deleteFileFromButton(button) {
-						deleteFile(decodeURIComponent(button.dataset.fileName || ''));
-					}
-
-					window.deleteFileFromButton = deleteFileFromButton;
 
 					/**
 					 * 删除文件
@@ -1813,6 +1902,7 @@ export default {
 						}
 					});
 
+					renderFileList(currentFiles);
 					switchTab(getSavedTab());
 					loadNotes();
 				</script>
